@@ -1,0 +1,203 @@
+---
+title: "Machine Learning for Health Care: Workshop number 2"
+output:
+  html_document:
+    fig_width: 7
+    fig_height: 5
+---
+
+During this workshop we will introduce methods for dealing with data with missing values (not just sweeping it under the rug) and injecting expert knowledge (informative priors), using Bayesian networks for classification, and evaluating and visualizing algorithmic performance.
+
+## Objectives
+- illustrate conjugate prior
+- illustrate prediction from imputed values, imputed values + indicators under MAR and MNAR
+- provide example methods to evaluate algorithm performance
+
+## Practicum objectives
+- introduce git for good coding practices
+- introduce ggplot for visualization
+- introduce mice for multiple imputation under MAR (and MNAR with assumptions)
+- introduce bnlearn for Bayesian network analysis
+
+### Conjugate prior
+This code illustrates the use of the beta-binomial conjugacy. By modifying the prior, we get different likelihood estimates for the probability of heads. With an uninformative prior, we get the Maximum Likelihood (ML) estimate. With an informative prior, we get the Maximum A Posteriori (MAP) estimate.
+
+Also notice the use of the package "ggplot2". This is a very useful graphing package that we will be using thoughout the course.
+
+```{r eval=T, message=F}
+library(dplyr)
+library(ggplot2)
+priorNumberOfHeads = 0
+priorNumberOfTails = 0
+
+nHeads = 2
+nTails = 1
+xat = seq(0,1,0.001)
+data = data = data.frame(y = dbeta(xat,shape1=1+priorNumberOfHeads+nHeads,
+                                   shape2=1+priorNumberOfTails+nTails),
+                         x = xat)
+ggplot(data = data, aes(x=x,y=y)) +
+  geom_line() +
+  geom_vline(xintercept=data$x[which.max(data$y)], color="red") +
+  ggtitle("Uninformative beta prior")
+print(paste0("Max at ", data$x[which.max(data$y)]))
+```
+<br>
+Now impose a strong prior.
+```{r eval=T}
+priorNumberOfHeads = 100
+priorNumberOfTails = 100
+data = data = data.frame(y = dbeta(xat,shape1=1+priorNumberOfHeads+nHeads,
+                                   shape2=1+priorNumberOfTails+nTails),
+                         x = xat)
+ggplot(data = data, aes(x=x,y=y)) +
+  geom_line() +
+  geom_vline(xintercept=data$x[which.max(data$y)], color="red") +
+  ggtitle("Strong beta prior")
+print(paste0("Max at ", data$x[which.max(data$y)]))
+
+```
+
+
+### Missing data
+We will use the package "mice", although you may use other packages (e.g. missForest). MICE performs multiple imputation somewhat similarly to the expectation-maximization procedure we saw in lecture. You can read the implementation details, but for our purposes we will run it and inspect the results it gives. Again, imputation is appropriate for missing at random (MAR) data, but you should consider using indicators for missingness if your data are MNAR. 
+
+Let's take a look at the primary biliary cirrhosis data set you used for Homework 1.
+```{r eval=T, results="hide", message=F}
+library(lattice)
+library(mice)
+library(survival)
+data = pbc %>% tbl_df() %>% filter(!is.na(trt))
+data$status = data$status==2
+missing = md.pattern(data); missing
+
+mdata = mice(data = data, m = 5, maxit=2, seed = 0)
+
+#install.packages("Amelia") # another imputation package, based on multivariate normal imputation
+#library(Amelia)
+#amelia(...)
+```
+
+```{r eval=T}
+which(mdata$method !="") %>% names()
+#ggplot doesn't make nice pairwise scatterplots, thus "lattice" package
+xyplot(x = mdata, chol+copper+trig+platelet~chol+copper+trig+platelet, pch=18) # magenta are the imputations to see if they visually seem reasonable
+
+```
+
+Now with our first imputed data set (normally you would do the analysis for each imputed data set and pool the results (for accuracy, averaging across imputed data sets is fine)), we can use Naive Bayes for classification.
+
+We have to do some manipulation because the "bnlearn" package doesn't play nicely with real values. They implement a ```discretize``` function but you still have to coax the data to make it work.
+```{r eval=T, warning=F, message=F}
+library(bnlearn)
+data1 = complete(mdata,1) # first of five imputed data sets
+
+data1[,sapply(data1, (function(x) length(unique(x))<6))] = lapply(data1[,sapply(data1, (function(x) length(unique(x))<6))], as.factor) # convert features that are integers but really categorical
+data1[,sapply(data1, is.integer)] = lapply(data1[,sapply(data1, is.integer)], as.numeric) # convert integer features to doubles
+data1 = data1 %>% tbl_df() %>% 
+  mutate(status = as.factor(status)) %>%
+  select(-c(id,time))
+data1discrete = discretize(data1)
+ordering = sample(1:nrow(data1discrete))
+
+ddtrain = data1discrete[ordering[1:200],]
+ddtest = data1discrete[-ordering[1:200],]
+
+nb = naive.bayes(ddtrain, "status")
+fitted = bn.fit(nb, ddtrain)
+```
+
+We now apply our model "fitted" to the test data and get the following confusion matrix:
+```{r eval = T, warning=F}
+predict(fitted, ddtest) %>% table(ddtest$status)
+```
+As you can see the accuracy is not terrific (but neither was the accuracy of logistic regression--likely it is just a hard problem).
+
+Let's try Tree-Augmented Naive Bayes:
+```{r eval=T, warning=F}
+tan = tree.bayes(ddtrain, "status")
+fittedTan = bn.fit(tan, ddtrain)
+predict(fittedTan, ddtest) %>% table(ddtest$status)
+```
+Does it do slightly better?
+
+Now let's plot an ROC curve and a PR curve:
+```{r eval=T, warning=F, message=F}
+library(ROCR)
+tanProbs = predict(fittedTan, ddtest, prob=T) %>% attr("prob")
+comparison = data.frame(predictions = tanProbs["TRUE",], actual= ddtest["status"]) %>% tbl_df()
+performanceROC = prediction(comparison[[1]], comparison[[2]]) %>%
+  performance("tpr","fpr")
+
+# one option
+performanceROC %>% plot()
+
+# second option
+ggdisplay = function(perf, title="ROC", xlab = "fpr", ylab = "tpr") {
+  ggperf = data.frame(y = perf@y.values[[1]],
+                    x = perf@x.values[[1]])
+  ggplot(data = ggperf, aes(x=x,y=y)) +
+    geom_line() +
+    coord_cartesian(xlim=c(0,1),ylim=c(0,1))+
+    xlab(xlab) + ylab(ylab) +
+    ggtitle(title)
+}
+
+ggdisplay(performanceROC)
+
+performancePR = prediction(comparison[[1]],comparison[[2]]) %>%
+  performance("prec","rec")
+ggdisplay(performancePR, "PR curve", "recall", "precision")
+
+```
+
+## Your turn
+
+Compare Naive Bayes, logistic regression, and TAN with different train set sizes: {3, 10, 30, 100}.
+
+For each of these data sizes:
+
+- Determine the classification accuracy in the the test set
+- Plot a learning curve (y = accuracy; x = log(train set size)) with ggplot
+
+### Using git
+Before you start above, initialize a git repository with this file alone in a folder.
+
+```
+git init .
+git status
+git add 11conjugate_mnar_evaluations.Rmd
+git status
+git commit -m "<your commit comment here>"
+
+git log
+```
+(typing 'q' should get you out of the log of commits)
+
+Now make changes to the file and save it to disk. The next time you use git, you should be able to see the changes and commit them:
+
+```
+git status
+git add 11conjugate_mnar_evaluations.Rmd
+git status
+git commit -m "<your first revisiion comment here>"
+
+git log
+```
+
+If these commands were successful, then you successfully committed a revision to your git repository. Now you no longer need to fear overwriting previously successful code, because if you overwrite it, you can always go back to the last committed version.
+
+There is much more to git. Here are few commands for you to explore:
+```
+git help
+git push
+git pull
+git revert <revision hash>
+git branch
+```
+
+#### Additionally, here are a few tutorials to help you get comfortable (recommended!):
+
+https://services.github.com/on-demand/downloads/github-git-cheat-sheet.pdf
+
+https://try.github.io/levels/1/challenges/1
