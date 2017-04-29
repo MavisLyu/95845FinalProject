@@ -1,0 +1,175 @@
+---
+title: "Healthcare Final Project"
+author: Mengfei Lyu
+output: html_document
+---
+## Data Processing
+
+```{r eval=T, message=F, warning=FALSE}
+library(RNHANES)
+library(mice)
+library(ggplot2)
+```
+
+Download list of files and variables
+```{r eval=T, message=F, warning=FALSE}
+files <- nhanes_data_files()
+variables <- nhanes_variables()
+```
+
+Download the required data file
+```{r eval=T, message=F, warning=FALSE}
+examination <- nhanes_load_data("BMX_H", "2013-2014")
+demographic <- nhanes_load_data("DEMO_H", "2013-2014")
+lab1 <- nhanes_load_data("FASTQX_H", "2013-2014")
+lab2 <- nhanes_load_data("TRIGLY_H", "2013-2014")
+question <- nhanes_load_data("BPQ_H", "2013-2014")
+diery <- nhanes_load_data("DR1TOT_H", "2013-2014")
+```
+
+```{r eval=T, message=F, warning=FALSE}
+View(examination) 
+View(demographic)
+View(lab1)
+View(lab2)
+View(question)
+View(diery)
+```
+
+Select target features and rename them
+```{r eval=T, message=F, warning=FALSE}
+#examination data
+variables <- c("SEQN","BMXWT","BMXHT","BMXBMI")
+examine <- examination[variables]
+new.names <- c("id","weight","height","bmi")
+names(examine) <- new.names
+
+#demographic data
+variables <- c("SEQN","RIAGENDR","RIDAGEYR")
+demography <- demographic[variables]
+new.names <- c("id","gender","age")
+names(demography) <- new.names
+
+#laboratory data
+variables <- c("SEQN","PHQ020","PHQ030","PHQ060")
+labora1 <- lab1[variables]
+new.names <- c("id","sugar_cream","alcohol","supplement")
+names(labora1) <- new.names
+
+variables <- c("SEQN","LBDLDL")
+labora2 <- lab2[variables]
+new.names <- c("id","LDL_cholesterol")
+names(labora2) <- new.names
+
+#questionnaire data
+variables <- c("SEQN","BPQ060","BPQ100D")
+ques <- question[variables]
+new.names <- c("id","cholesterol_check","cholesterol_medicine")
+names(ques) <- new.names
+
+#diery data
+variables <- c("SEQN","WTDRD1","DRQSPREP","DRQSDIET","DR1TKCAL","DR1TPROT","DR1TCARB","DR1TSUGR","DR1TFIBE","DR1TTFAT","DR1TCHOL","DR1TATOC","DR1TRET","DR1TVARA","DR1TACAR","DR1TBCAR","DR1TCRYP","DR1TLYCO","DR1TLZ","DR1TVB1","DR1TVB2","DR1TNIAC","DR1TVB6","DR1TFOLA","DR1TFA","DR1TCHL","DR1TVB12","DR1TVC","DR1TVD","DR1TVK","DR1TCALC","DR1TPHOS","DR1TMAGN","DR1TIRON","DR1TZINC","DR1TCOPP","DR1TSODI","DR1TPOTA","DR1TSELE","DR1TCAFF","DR1TTHEO","DR1TALCO","DR1TMOIS","DR1_320Z")
+diet <- diery[variables]
+new.names <- c("id","dietary_weight","salt","on_diet","energy","protein","carbo","sugars","fiber","fat","cholesterol","ve","retinol","va","alpha-caro","beta-caro","beta-cryptoxanthin","lycopene","lutein_zeaxanthin","vb1","vb2","niacin","vb6","folate","folic_acid","choline","vb12","vc","vd","vk","calcium","phosphorus","magnesium","iron","zinc","copper","sodium","potassium","selenium","caffeine","theobromine","alcohol_gm","moisture","water")
+names(diet) <- new.names
+```
+
+Join tables with id
+```{r eval=T, message=F, warning=FALSE}
+merge1 <- merge(examine, demography, by = "id")
+merge2 <- merge(merge1, labora1, by = "id")
+merge3 <- merge(merge2, labora2, by = "id")
+merge4 <- merge(merge3, ques, by = "id")
+merged <- merge(merge4, diet, by = "id")
+```
+
+Classify whether a respontant has high LDL-cholesterol. Measurement comes from  National Heart, Lung, and Blood Institute
+```{r eval=T, message=F, warning=FALSE}
+merged$high_cholesterol[merged$age <18 &  merged$LDL_cholesterol >= 130]  <- 1
+merged$high_cholesterol[merged$age >=18 &  merged$LDL_cholesterol >= 160]  <- 1
+merged$high_cholesterol[is.na(merged$high_cholesterol)]  <- 0
+```
+
+Check missing rate and filter out features with missing rate larger than 10%.
+```{r eval=T, message=F, warning=FALSE}
+total <- nrow(merged)
+columns <- colnames(merged)
+for (c in columns){
+  num=sum(is.na(merged[c]))
+  print(paste(c, round(num/total*100,2)))
+}
+```
+
+According to the result, drop columns including cholesterol_check,cholesterol_medicine as well as id and LDL-cholesterol
+```{r eval=T, message=F, warning=FALSE}
+merged <- subset(merged, 
+                 select=-c(id,LDL_cholesterol,cholesterol_check,cholesterol_medicine) )
+```
+
+Deal with missing data.
+If dietary_weight is 0.0, that means the respondent didn't take the diery survey, hence these records need to be excluded.
+```{r eval=T, message=F, warning=FALSE}
+merged <- subset(merged, dietary_weight >0)
+```
+
+For other missing data, conduct imputation to get full dataset
+```{r eval=T, message=F, warning=FALSE}
+surveydata <- mice(merged, m = 5, maxit=2, seed = 0)
+cholesterol <- complete(surveydata,1)
+```
+
+Transfer categorical data to numeric, create one-hot encoding feature to represent categorical features
+```{r eval=T, message=F, warning=FALSE}
+# convert all categorical features to factor
+cholesterol <- transform(cholesterol, 
+            gender = as.factor(gender),
+            sugar_cream = as.factor(sugar_cream),
+            alcohol = as.factor(alcohol),
+            supplement = as.factor(supplement),
+            salt = as.factor(salt),
+            on_diet = as.factor(on_diet))
+
+
+categorical <- c("gender","sugar_cream","alcohol","supplement","salt","on_diet")
+ohedata <- cholesterol[categorical]
+
+ohedata <- model.matrix(~ .+0, data=ohedata,contrasts.arg = lapply(ohedata, contrasts, contrasts=FALSE))
+
+processed <- data.frame(ohedata,cholesterol)
+# drop original categorical columns
+processed <- subset(processed, select= -c(gender,sugar_cream,alcohol,supplement,salt,on_diet))
+
+#rename one-hot encoding features
+newnames <- c("male","female","add_sugar_cream","no_sugar_cream","alcohol","no_alcohol","supplement","no_supplement","salt_never","salt_rare","salt_occasional","salt_often","salt_unknown","on_diet","no_diet","diet_unknown")
+names(processed)[1:16] <- newnames
+```
+
+Data Exploration
+Visualization 1-High cholesterol ratio in sample
+```{r eval=T, message=F, warning=FALSE}
+ggplot(processed,  aes(x = high_cholesterol) ) +geom_bar()
+```
+From the plot, we can see the ratio of positive data points is much lower than the negative datapoints. This indicates that true positive rate is a more proper model evaluation measurement than accuracy because even the model classfies all datapoints to negative, it can still achieve a high accuracy.
+  
+Visualization 2-Gender distribution in sample
+```{r eval=T, message=F, warning=FALSE}
+ggplot(cholesterol,  aes(x = gender) ) +geom_bar()
+```
+The distribution of gender within sample population is approximately balanced. Hence the analysis can provide a reasonable insight to both gender of population.
+
+Visualization 3-Age distribution in sample
+```{r eval=T, message=F, warning=FALSE}
+ggplot(processed, aes(age)) +geom_bar()
+```
+The distribution of age within sample population has a higher ratio of people older than 80. Hence the analysis result will provide a more profound insight to elder people within the whole population.
+
+Rewrite processed data to txt file for machine learning model construction.
+```{r eval=T, message=F, warning=FALSE}
+write.table(processed, "mydata.txt", sep="\t",row.names = F)
+```
+
+Get class weight
+```{r eval=T, message=F, warning=FALSE}
+processed <- transform(processed, 
+            high_cholesterol = as.factor(high_cholesterol))
+```
